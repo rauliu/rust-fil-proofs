@@ -9,8 +9,6 @@ use std::time::{Duration, Instant};
 
 use clap::{App, AppSettings, Arg, ArgGroup, SubCommand};
 
-use paired::bls12_381::G1Affine;
-
 use filecoin_proofs::constants::*;
 use filecoin_proofs::parameters::{
     setup_params, window_post_public_params, winning_post_public_params,
@@ -31,6 +29,8 @@ use storage_proofs::hasher::Sha256Hasher;
 use storage_proofs::merkle::MerkleTreeTrait;
 use storage_proofs::porep::stacked::{StackedCircuit, StackedCompound, StackedDrg};
 use storage_proofs::post::fallback::{FallbackPoSt, FallbackPoStCircuit, FallbackPoStCompound};
+
+const CHUNK_SIZE: usize = 10_000;
 
 fn get_head_commit() -> String {
     let output = Command::new("git")
@@ -504,9 +504,7 @@ fn get_mixed_entropy() -> [u8; 32] {
 
 /// Contributes entropy to the current phase2 parameters for a circuit, then writes the updated
 /// parameters to a new file.
-fn contribute_to_params_streaming(path_before: &str) {
-    let write_raw = true;
-
+fn contribute_to_params_streaming<'a>(path_before: &'a str, write_raw: bool) {
     let (proof, hasher, sector_size, head, prev_param_number, param_size, read_raw) =
         parse_params_filename(path_before);
 
@@ -540,12 +538,6 @@ fn contribute_to_params_streaming(path_before: &str) {
 
     let start_total = Instant::now();
 
-    let chunk_size = 10_000; // FIXME: make a parameter
-    let buf_size = chunk_size * G1Affine::raw_fmt_size();
-
-    let file_before = File::open(path_before).unwrap();
-    let reader = BufReader::with_capacity(buf_size, file_before);
-
     info!("making contribution");
     let start_contrib = Instant::now();
 
@@ -555,14 +547,14 @@ fn contribute_to_params_streaming(path_before: &str) {
     );
 
     let mut streamer = if param_size.is_large() {
-        Streamer::new_from_large_file(reader, read_raw, write_raw).unwrap_or_else(|e| {
+        Streamer::new_from_large_file(path_before, read_raw, write_raw).unwrap_or_else(|e| {
             panic!(
                 "failed to make streamer from large `{}`: {}",
                 path_before, e
             );
         })
     } else {
-        Streamer::new(reader, read_raw, write_raw).unwrap_or_else(|e| {
+        Streamer::new(path_before, read_raw, write_raw).unwrap_or_else(|e| {
             panic!(
                 "failed to make streamer from small `{}`: {}",
                 path_before, e
@@ -577,10 +569,9 @@ fn contribute_to_params_streaming(path_before: &str) {
             path_after, e
         );
     });
-    let mut writer = BufWriter::with_capacity(buf_size, file_after);
 
     let contrib = streamer
-        .contribute(&mut rng, &mut writer, chunk_size)
+        .contribute(&mut rng, file_after, CHUNK_SIZE)
         .expect("failed to make contribution");
 
     let contrib_str = hex_string(&contrib);
@@ -605,7 +596,7 @@ fn contribute_to_params_streaming(path_before: &str) {
     );
 }
 
-fn convert_small(path_before: &str) {
+fn convert_small<'a>(path_before: &'a str) {
     let (proof, hasher, sector_size, head, param_number, param_size, read_raw) =
         parse_params_filename(path_before);
 
@@ -635,12 +626,6 @@ fn convert_small(path_before: &str) {
 
     let start_total = Instant::now();
 
-    let chunk_size = 10_000; // FIXME: make a parameter
-    let buf_size = chunk_size * std::mem::size_of::<G1Affine>();
-
-    let file_before = File::open(path_before).unwrap();
-    let reader = BufReader::with_capacity(buf_size, file_before);
-
     info!("converting");
 
     info!(
@@ -651,7 +636,7 @@ fn convert_small(path_before: &str) {
     let mut streamer = if param_size.is_large() {
         panic!("cannot convert large param format");
     } else {
-        Streamer::new(reader, read_raw, write_raw).unwrap_or_else(|e| {
+        Streamer::new(path_before, read_raw, write_raw).unwrap_or_else(|e| {
             panic!(
                 "failed to make streamer from small `{}`: {}",
                 path_before, e
@@ -666,10 +651,9 @@ fn convert_small(path_before: &str) {
             path_after, e
         );
     });
-    let mut writer = BufWriter::with_capacity(buf_size, file_after);
 
     streamer
-        .process(&mut writer, chunk_size)
+        .process(file_after, CHUNK_SIZE)
         .expect("failed to convert");
 
     info!(
@@ -1238,12 +1222,10 @@ fn main() {
 
                 let (proof, hasher, sector_size, head, param_num_before, _param_size, _read_raw) =
                     parse_params_filename(path_before);
+
                 let param_num = param_num_before + 1;
+
                 // Default to small contributions.
-                /*
-                let mut log_filename =
-                    params_filename(proof, hasher, sector_size, &head, param_num, param_size);
-                */
                 let mut log_filename = params_filename(
                     proof,
                     hasher,
@@ -1256,7 +1238,7 @@ fn main() {
                 log_filename.push_str(".log");
                 setup_logger(&log_filename);
 
-                contribute_to_params_streaming(path_before);
+                contribute_to_params_streaming(path_before, raw);
             }
             "contribute-non-streaming" => {
                 // This path only exists to test streaming vs non-streaming.
@@ -1266,11 +1248,8 @@ fn main() {
                 let (proof, hasher, sector_size, head, param_num_before, _param_size, _read_raw) =
                     parse_params_filename(path_before);
                 let param_num = param_num_before + 1;
+
                 // Default to small contributions.
-                /*
-                let mut log_filename =
-                    params_filename(proof, hasher, sector_size, &head, param_num, param_size);
-                */
                 let mut log_filename = params_filename(
                     proof,
                     hasher,
