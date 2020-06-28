@@ -252,11 +252,7 @@ fn parse_params_filename(path: &str) -> (Proof, Hasher, Sector, String, usize, P
         other => panic!("invalid param-size in params filename: {}", other),
     };
 
-    let raw_fmt = if split.len() > 6 && split[6] == "raw" {
-        true
-    } else {
-        false
-    };
+    let raw_fmt = split.get(6) == Some(&"raw");
 
     (
         proof,
@@ -572,7 +568,7 @@ fn contribute_to_params_streaming<'a>(path_before: &'a str, write_raw: bool) {
 
     let contrib = streamer
         .contribute(&mut rng, file_after, CHUNK_SIZE)
-        .expect("failed to make contribution");
+        .unwrap_or_else(|e| panic!("failed to make streaming contribution: {}", e));
 
     let contrib_str = hex_string(&contrib);
     info!(
@@ -600,17 +596,23 @@ fn convert_small<'a>(path_before: &'a str) {
     let (proof, hasher, sector_size, head, param_number, param_size, read_raw) =
         parse_params_filename(path_before);
 
+    // TODO: change this if we update the large MPC params (and G2Affine) to support the raw serialization format.
+    assert!(
+        param_size.is_small(),
+        "converting large params to raw format is not currently supported"
+    );
+
     let write_raw = !read_raw;
 
     info!(
-        "converting params for circuit: {}-{}-{}-{}-{} {}->{}",
-        proof.pretty_print(),
-        hasher.pretty_print(),
-        sector_size.pretty_print(),
-        head,
-        param_size.pretty_print(),
-        param_number,
-        if write_raw { "raw" } else { "xxx" } // FIXME
+        "converting params {to_from} raw format for circuit: {proof}-{hasher}-{sector_size}-{head}-{num} {param_size}",
+        to_from = if write_raw { "to" } else { "from" },
+        proof = proof.pretty_print(),
+        hasher = hasher.pretty_print(),
+        sector_size = sector_size.pretty_print(),
+        head = head,
+        num = param_number,
+        param_size = param_size.pretty_print(),
     );
 
     // Default to small params for first participant.
@@ -629,7 +631,8 @@ fn convert_small<'a>(path_before: &'a str) {
     info!("converting");
 
     info!(
-        "making streamer from small 'before' params: {}",
+        "making streamer from small {} params: {}",
+        if read_raw { "raw" } else { "non-raw" },
         path_before
     );
 
@@ -644,7 +647,11 @@ fn convert_small<'a>(path_before: &'a str) {
         })
     };
 
-    info!("writing small 'after' params to file: {}", path_after);
+    info!(
+        "streamer is writing {} formatted params to file: {}",
+        if write_raw { "raw" } else { "non-raw" },
+        path_after
+    );
     let file_after = File::create(&path_after).unwrap_or_else(|e| {
         panic!(
             "failed to create 'after' params file `{}`: {}",
@@ -667,9 +674,6 @@ fn convert_small<'a>(path_before: &'a str) {
 fn contribute_to_params(path_before: &str) {
     let (proof, hasher, sector_size, head, prev_param_number, param_size, read_raw) =
         parse_params_filename(path_before);
-
-    dbg!("in contribute_to_params");
-    assert_eq!(false, read_raw, "Raw format only supported when streaming.");
 
     let param_number = prev_param_number + 1;
 
@@ -722,8 +726,7 @@ fn contribute_to_params(path_before: &str) {
         info!("reading small 'before' params as small: {}", path_before);
         let file_before = File::open(path_before).unwrap();
         let mut reader = BufReader::with_capacity(1024 * 1024, file_before);
-        let read_raw_affine = false; // FIXME: need to support the true path also.
-        MPCSmall::read(&mut reader, read_raw_affine).unwrap_or_else(|e| {
+        MPCSmall::read(&mut reader, read_raw).unwrap_or_else(|e| {
             panic!(
                 "failed to read small param file `{}` as small: {}",
                 path_before, e
@@ -1412,6 +1415,10 @@ fn main() {
             }
             "convert" => {
                 let path_before = matches.value_of("path-before").unwrap();
+
+                let log_filename = format!("{}_convert.log", path_before);
+                setup_logger(&log_filename);
+
                 convert_small(path_before)
             }
             _ => unreachable!(),
